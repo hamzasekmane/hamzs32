@@ -1,0 +1,24 @@
+# QME Review Findings
+
+**Review date:** 2026-11-17
+**Branch:** `arena/456a48f0-hamzs32`
+**Status:** new indicator implementation and host tests added; MetaEditor/MT5 verification remains outstanding. The original checkout contained no MQL5 source, so this review distinguishes reconstruction from migration of missing code.
+
+| ID | Severity | Finding | File / line evidence | Fix status |
+|---|---|---|---|---|
+| F-01 | **High** | No original indicator/FSM/MTF sources or public interfaces were supplied. This branch therefore establishes a new indicator implementation; compatibility with any historical inputs, buffers, or dashboard fields cannot be verified. | Original source paths absent at task start. New entry point: `MQL5/Indicators/QME/QME_Indicator.mq5:1–22`; reconstruction and interface assumptions: `QME_Architecture_and_Engineering_Report.md:7–21, 75–81`. | **Partially addressed.** A single MTF cascade is implemented. Legacy FSM code could not be migrated/deleted because none was present. |
+| F-02 | **High** | Analysis must not run on unsynchronized or incomplete timeframe data, including `BarsCalculated() == -1` / error 4806. | `MQL5/Include/QME/Data/MTFDataLoader.mqh:44–57` checks synchronization; `:59–100` validates closed rates and retries `CopyRates`; `:102–134` checks calculated bars, handles 4806, and retries `CopyBuffer`; `:136–151, 194–222` load all frames and recheck sync; `MQL5/Indicators/QME/QME_Indicator.mq5:176–218` retries on timer and gates calculation. | **Implemented; host/static checked.** Actual broker-history and terminal behavior remains unverified. |
+| F-03 | **High** | Persistent neutral/unknown bias, empty zones, and missing targets depend on live history, series ordering, and broker feeds; host checks cannot establish chart behavior. | Bias and M5 confirmation: `MQL5/Include/QME/Analysis/SignalEngine.mqh:12–47`; zone scan and explicit empty-zone reason: `MQL5/Include/QME/Analysis/ZoneEngine.mqh:63–185`; opposing-zone/H4 target selection: `SignalEngine.mqh:50–99`. | **Implemented; terminal validation required** on BTCUSD H1 and other requested instrument classes. |
+| F-04 | **Medium** | Zone detection rules are deterministic structure heuristics, not proof of institutional intent or empirically validated order flow. | Order blocks, FVGs, sweeps: `MQL5/Include/QME/Analysis/ZoneEngine.mqh:82–154`; tick rounding, merging and strength: `:14–61`; pure feature logic: `MQL5/Include/QME/Core/QMEFeatureLogic.mqh:8–68`. | **Implemented with host and native test cases.** No performance or accuracy claims made. |
+| F-05 | **Medium** | The 0–100 entry probability is a confluence score, not a statistically calibrated probability. Its score and RR thresholds require strategy validation. | Score/explanation and gates: `MQL5/Include/QME/Analysis/SignalEngine.mqh:160–200`; shared score and RR math: `MQL5/Include/QME/Core/QMEFeatureLogic.mqh:71–87`. | **Implemented; documented as uncalibrated.** Defaults are 65 score and 1.50 RR; no win-rate claim. |
+| F-06 | **Medium** | ATR/tick/point normalization is symbol-agnostic by construction, but broker-specific tick/point behavior has not been exercised in MT5. | Tick and point lookup: `MQL5/Include/QME/Data/MTFDataLoader.mqh:260–266`; ATR-relative thresholds and tick-sized zones: `ZoneEngine.mqh:63–80, 103–125`; cross-scale host test: `Tests/test_qme_features.py:104–108`. | **Implemented and host-tested.** Verify live on BTCUSD, XAUUSD, FX, and indices. |
+| F-07 | **High** | MetaEditor compile and native MQL test execution were unavailable in the Linux environment. Passing host tests do not prove MQL compiler compatibility or runtime correctness. | Indicator/test build targets: `compile_metaeditor.bat:1–29`; native test runner: `MQL5/Scripts/QME/QME_RunTests.mq5`; host verifier: `verify_qme.py:103–190`. | **Blocked pending Windows MT5/MetaEditor.** Not compiled or runtime-tested. |
+| F-08 | **Low** | The analysis-only boundary could regress if later code adds trade APIs. | Indicator implementation: `MQL5/Indicators/QME/QME_Indicator.mq5`; forbidden-API check: `verify_qme.py:103–142`; regression scenario: `Tests/test_qme_features.py:50–54`. | **No trading APIs found by source/host checks.** Keep the contract test on future changes. |
+
+## Verification record
+
+- `python3 -m unittest discover -s Tests -p 'test_*.py' -v`: **18 tests passed**.
+- `python3 verify_qme.py`: **all host checks passed**—inventory, unique guards, acyclic includes, indicator/data/zone/scoring contracts, delimiter balance, and all host scenarios.
+- MQL5 native test runner: **not compiled or run**.
+- MetaEditor: **not compiled** in this environment.
+- MT5 chart / Strategy Tester: **not runtime-tested**.

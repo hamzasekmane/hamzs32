@@ -1,219 +1,94 @@
-# QuantumMarketEngine (QME) — Hardened Personal Quant Trading Architecture
-**Project:** QuantumMarketEngine (QME) v1.00 (Build 100)  
-**Role:** Senior MQL5 Software Architect & Quant Trading Systems Engineer  
-**Date:** November 17, 2026  
-**Scope:** Hardened Personal Quant Trading Architecture for MetaTrader 5 (MQL5)
+# QuantumMarketEngine (QME) — Architecture and Engineering Report
 
----
+**Review/update date:** 2026-11-17
+**Product boundary:** MT5 indicator; analysis and chart output only. QME contains no order placement, modification, or close calls.
+**Status:** source implementation added in this branch; host checks pass. MetaEditor compilation and terminal runtime remain unverified.
 
-## Executive Architectural Summary
+## Important reconstruction assumption
 
-QuantumMarketEngine (QME) has been production-hardened to strictly fulfill three core execution and data safety mandates:
-1. **Reject missing, stale, invalid or inconsistent market data.**
-2. **Prevent duplicate orders and repeated signal execution.**
-3. **Never send an order without valid SL, volume and broker validation.**
+At the start of this work, the tracked repository had no `.mq5` or `.mqh` source—only historical EA/test compiler logs, scripts, and an architecture document describing a trading EA. There was no source from which to preserve public inputs/buffers, migrate an existing FSM, or safely delete legacy code. The stale EA/test compiler logs were removed rather than carried forward as evidence for the new indicator.
 
-These requirements are implemented with multi-tiered defenses across the `Data`, `Risk`, `Execution`, and `Persistence` subsystems, ensuring absolute capital safety and platform reliability.
+To make progress within the requested indicator scope, this branch now establishes a new analysis-only indicator implementation and explicit interfaces. This is **not a source-to-source migration** of the missing implementation. Compatibility with its former public interfaces and behavior cannot be claimed. The old compile logs are historical evidence only and are not used as source.
 
----
+## Architecture decision: one MTF plan cascade
 
-## 1. Deep Dive: Market Data Validation & Rejection Pipeline
+The new indicator uses the MTF cascade as its single analysis source of truth:
 
 ```text
-[ Incoming Market Tick ]
-          │
-          ▼
-[ CMarketSnapshot::CaptureSnapshot() ]
-  ├── 1. Terminal Connectivity Invariant: TerminalInfoInteger(TERMINAL_CONNECTED) == true
-  ├── 2. Broker Tick Ingestion: SymbolInfoTick return status == true
-  ├── 3. IEEE 754 Floating-Point Invariant: MathIsValidNumber(bid) & MathIsValidNumber(ask)
-  ├── 4. Strict Pricing Invariant: bid > 0, ask > 0, ask >= bid, spreadPoints >= 0
-  ├── 5. Clock Desync / Future Timestamp Guard: tick.time <= TimeCurrent() + 5s
-  └── 6. Atomic Timestamp Capture: server tick time & GetTickCount64()
-          │
-          ▼
-[ CDataValidator::ValidateSnapshot() ]
-  ├── 7. Missing Data Guard: snapshot.IsValid() == true
-  ├── 8. Stale Data Guard: (TimeCurrent() - tick.time) <= m_maxTickAgeSeconds (Default: 10s)
-  ├── 9. Spread Spike Guard: tick.spreadPips <= m_maxAllowedSpreadPips (Default: 3.5 pips)
-  ├── 10. Intra-Tick Outlier Filter: |tick.bid - prevTick.bid| <= m_maxTickJumpPips (Default: 50 pips)
-  ├── 11. Symbol Session Mode: SYMBOL_TRADE_MODE != DISABLED and != CLOSEONLY
-  └── 12. Market Watch Status: SYMBOL_SELECT enforced for active data streaming
-          │
-          ▼
-[ CDataValidator::ValidateTickAnomaly() ]
-  └── 13. Spike Anomaly Filter: |tick.bid - lastClosedBar.close| <= m_maxPriceDeviationPips (Default: 300 pips)
-          │
-          ▼
-[ CDataValidator::ValidateBar() & ValidateBarSeries() ]
-  ├── 14. Confirmed Bar Invariant: shift >= 1 & isClosed == true (Mandatory Rule 10)
-  ├── 15. Geometric OHLC Integrity: High >= Low, Open & Close in [Low, High], tickVolume >= 0
-  └── 16. Series Monotonicity: Strictly non-overlapping descending timestamps (no duplicate bars)
-          │
-          ▼
-[ CDataValidator::ValidateHistorySync() ]
-  └── 17. Rate Synchronization: SeriesInfoInteger(symbol, tf, SERIES_SYNCHRONIZED) == true (LTF & HTF)
+H4 + H1 closed rates, ATR and EMA context
+                 │
+                 ├── bias alignment and demand/supply zones
+                 ▼
+M5 closed rates, ATR and EMA buffers
+                 │
+                 ├── entry confirmation, score, stop, target and RR gate
+                 ▼
+Dashboard, chart zones/target, and indicator signal buffers
 ```
 
-### Fail-Safe Actions
-If ANY invariant is violated:
-- Evaluation loop aborts immediately without downstream analytical or trade execution.
-- System health is set to `HEALTH_DEGRADED` or `HEALTH_CRITICAL`.
-- Diagnostic audit log is dispatched to `CLogger` with timestamp, symbol, and exact numerical metrics.
-- `CRiskEngine::AuthorizeSignal` automatically rejects any pending signal if market data degrades prior to order dispatch.
+There is no legacy M15 FSM implementation in the restored/current source tree, so no FSM code could be migrated or deleted. No second signal path is implemented. If the original FSM sources are later supplied, this decision and the public interface compatibility must be reviewed against them before merging them into this implementation.
 
----
+## Data readiness and retry behavior
 
-## 2. Deep Dive: Multi-Tier Duplicate Prevention Architecture
+`MQL5/Include/QME/Data/MTFDataLoader.mqh` owns all required H4, H1, and M5 series/buffer access. For each timeframe it:
 
-To prevent duplicate orders, double-firing on intra-bar ticks, or replaying signals after terminal restarts, QME employs a **5-Tier Defense In Depth**:
+1. Calls `SeriesInfoInteger(..., SERIES_SYNCHRONIZED, ...)` before copying or analysis.
+2. Loads a fixed number of closed rates with bounded `CopyRates` retries.
+3. Checks each ATR/EMA handle with `BarsCalculated`; negative/insufficient counts defer analysis. Error 4806 is retained in the diagnostic reason.
+4. Retries each `CopyBuffer` read and reports which timeframe/buffer failed.
+5. Reports readiness only after all three timeframes, their rates, ATR, and EMA buffers are valid.
 
-```text
-[ Candidate Signal from StrategyEngine ]
-                   │
-                   ▼
-       [ ExecutionEngine Gateway ]
-                   │
-  Tier 1: [ In-Flight Reentrancy Mutex ]
-          Is an order already in routing / awaiting broker response?
-          ──► YES: ABORT (QME_ERR_EXEC_DUPLICATE_SIGNAL)
-          ──► NO : Proceed
-                   │
-  Tier 2: [ Memory Ring Buffer Check ]
-          Has signalHash been executed in current session?
-          ──► YES: ABORT (QME_ERR_EXEC_DUPLICATE_SIGNAL)
-          ──► NO : Proceed
-                   │
-  Tier 3: [ Same-Bar Execution Lock ]
-          Has an order already been executed on this candle bar (timestamp == m_lastExecutedBarTime)?
-          ──► YES: ABORT (QME_ERR_EXEC_DUPLICATE_SIGNAL)
-          ──► NO : Proceed
-                   │
-  Tier 4: [ Broker Live State Scan ]
-          A. Active Open Positions: Scan PositionsTotal() for matching MagicNumber & signalHash.
-          B. Active Pending Orders: Scan OrdersTotal() for matching MagicNumber & signalHash.
-          C. Today's Deals: Scan HistoryDealsTotal() for matching MagicNumber & signalHash.
-          ──► MATCH FOUND: ABORT (QME_ERR_EXEC_DUPLICATE_SIGNAL)
-          ──► NO MATCH   : Proceed
-                   │
-  Tier 5: [ Cross-Restart Hash Persistence ]
-          Hashes serialized to disk (QME_State_Hashes_*.txt) and restored on startup.
-          Guarantees signals executed prior to restart are NEVER re-executed!
-                   │
-                   ▼
-          [ Proceed to Order Routing ]
-```
+The indicator starts a timer (`InpTimerSeconds`, default two seconds). Each `OnTimer` calls `Refresh` again, allowing history synchronization to progress without a busy wait. `OnCalculate` and the analysis routine gate all signal/zone calculation on `Ready()`. Before readiness, the dashboard says calculation is deferred and the signal buffers are empty.
 
----
+Retries are bounded within each event and recur on subsequent timer events. No `Sleep` is used from indicator code.
 
-## 3. Deep Dive: Mandatory Pre-Execution Risk Boundary & Zero-Bypass Controls
+## Zone engine
 
-QuantumMarketEngine strictly enforces that **every order requires RiskEngine authorization**, with absolute prohibition against bypassing risk controls to increase signal frequency:
+`MQL5/Include/QME/Analysis/ZoneEngine.mqh` scans closed H4/H1 candles and rounds resulting price boundaries to the symbol’s trade tick size (falling back to point size).
 
-```text
-[ Candidate Signal Generated by StrategyEngine ]
-                     │
-                     ▼
-        [ CRiskEngine::AuthorizeSignal() ]
-  ├── Gate 1: Account Authorization Guard (Mode verification, Demo explicit opt-in, Real ID match)
-  ├── Gate 2: Market Data Integrity & Freshness Check (Age <= 10s, Spread <= 3.5 pips, No anomalies)
-  ├── Gate 3: Structural & Mandatory Stop Loss Invariants (SL > 0, MathIsValidNumber(SL) == true)
-  ├── Gate 4: Directional SL Geometry (BUY: SL < Entry, SELL: SL > Entry)
-  ├── Gate 5: Broker StopLevel & FreezeLevel Compliance (SL distance >= StopLevel * _Point)
-  ├── Gate 6: Portfolio Exposure Boundaries (Daily loss <= 3%, Max drawdown <= 6%, Active trades < 2)
-  ├── Gate 7: Position Sizing Normalization (Strictly round down to SYMBOL_VOLUME_STEP; never round up)
-  ├── Gate 8: Margin Sufficiency Invariant (Required margin <= FreeMargin * 0.80)
-  └── Gate 9: Pre-Flight Native OrderCheck() Validation (retcode == TRADE_RETCODE_DONE)
-                     │
-         ┌───────────┴───────────┐
-      [ VETOED ]             [ AUTHORIZED ]
-         │                       │
-      Abort order             Generate immutable RiskVerdict
-      Log audit reason        Dispatch to CExecutionEngine::ExecuteAuthorizedOrder()
-                                 │
-                                 ├── Mutex: In-Flight Reentrancy Check
-                                 ├── Freshness: Verdict Age <= 10s Check
-                                 ├── Parity: Verdict Enforced SL & Normalized Volume Invariants
-                                 └── Multi-Tier Duplicate Prevention (Ring buffer, Bar lock, Broker deals)
-```
+- **Order blocks:** last opposing candle before a displacement of at least 0.45 ATR.
+- **Fair value gaps:** three-candle imbalance with gap at least 0.10 ATR and no less than tick/point resolution.
+- **Liquidity sweeps:** closed candle takes a prior 12-bar range extreme and closes back inside.
+- **Premium/discount:** zone center relative to the scanned timeframe’s recent range midpoint.
+- Nearby same-direction zones are merged using an ATR-normalized tolerance; the component flags are retained.
+- Strength is an explainable 0–100 grade: order block 35, FVG 25, sweep 25, premium/discount 15. Grades are A (80+), B (60+), C (40+), and D (below 40).
 
-### Zero-Bypass Principles
-1. **Unconditional Gatekeeping:** No code path exists in QME to submit orders directly to `OrderManager` or `CTrade`. The only order submission route is `CExecutionEngine::ExecuteAuthorizedOrder()`, which rejects any call lacking an active, non-expired `RiskVerdict`.
-2. **Frequency Defense:** Risk boundaries are invariant and cannot be muted, relaxed, or bypassed to accommodate higher signal frequency. Tight StopLoss scalping inside broker StopLevel, unhedged exposure, or exceeding concurrent trade limits are strictly vetoed.
-3. **Execution Parity:** `ExecutionEngine` sends strictly the volume and SL calculated by `RiskEngine` (`verdict.authorizedVolume`, `verdict.enforcedSL`), discarding any unvalidated values.
+The ratios are shared across symbols; absolute price increments are derived from tick size, point, and timeframe ATR. These rules are deterministic heuristics, not claims of institutional intent or measured trading performance.
 
----
+## Entry score, target, and no-entry diagnostics
 
-## 4. Verification & Regression Coverage
+`MQL5/Include/QME/Analysis/SignalEngine.mqh` requires aligned H4/H1 EMA/close trends, a nearby zone in the bias direction, and a confirming closed M5 candle. The 0–100 **entry probability/confluence score** is a weighted, explainable heuristic:
 
-The hardened requirements are verified through both host-level automated static analysis (`verify_qme.py`) and native MQL5 test suites (`QME_RunTests.mq5`).
+- aligned H4/H1 bias: 20 points
+- zone strength: up to 25
+- FVG: 15
+- liquidity sweep: 15
+- premium/discount location: 10
+- closed M5 confirmation: 15
 
-```text
-========================================================================================
-Test Suite            Test Case Description             Target Invariant       Result
-========================================================================================
-Data Integrity        Reject Uninitialized Snapshot     Rule 12                PASSED
-Data Integrity        Reject Non-Positive Price (Bid<=0)Rule 12                PASSED
-Data Integrity        Reject Corrupt NaN/Inf Ticks      Rule 12                PASSED
-Data Integrity        Reject Inverted Spread (Ask<Bid)  Rule 12                PASSED
-Data Integrity        Reject Stale Ticks (> 10 sec)     Rule 12                PASSED
-Data Integrity        Reject Future Tick (Clock Desync) Rule 12                PASSED
-Data Integrity        Reject Spread Spike (> 3.5 pips)  Rule 12                PASSED
-Data Integrity        Reject Intra-Tick Jump (> 50 pips)Rule 12                PASSED
-Data Integrity        Reject Bar Spike (> 300 pips)     Rule 12                PASSED
-Data Integrity        Reject Shift 0 Active Bar         Rule 10                PASSED
-Data Integrity        Reject Corrupt Bar (High < Low)   Rule 12                PASSED
-Data Integrity        Reject Out-of-Bounds OHLC Bar     Rule 12                PASSED
-Data Integrity        Reject Non-Monotonic Bar Series   Rule 12                PASSED
-Account Guard         Analysis-Only Mode Default        Safety Default         PASSED
-Account Guard         Demo Mode Explicit Authorization  Safety Gating          PASSED
-Account Guard         Real Account ID Lockdown Check    Safety Identity        PASSED
-Risk Boundary         Reject Missing Stop Loss (SL<=0)  Requirement 1 & 3      PASSED
-Risk Boundary         Reject Inverted BUY SL (SL>=Entry)Requirement 1 & 3      PASSED
-Risk Boundary         Reject Inverted SELL SL (SL<=Entry)Requirement 1 & 3     PASSED
-Risk Boundary         Reject StopLevel Violations       Requirement 1 & 3      PASSED
-Risk Boundary         Reject FreezeLevel Violations     Requirement 1 & 3      PASSED
-Risk Boundary         Reject Concurrent Limit Reached   Requirement 1 & 3      PASSED
-Risk Boundary         Reject Stale Data on Authorize    Requirement 1 & 12     PASSED
-Risk Boundary         Position Sizing Normalization     Requirement 1 & 3      PASSED
-Execution             Reject Without Risk Authorization Requirement 1 & Rule 9 PASSED
-Execution             Reject Non-Positive Verdict Vol   Requirement 1          PASSED
-Execution             Reject Stale Authorization (>10s) Requirement 1          PASSED
-Execution             Reject Duplicate Hash in Memory   Requirement 2          PASSED
-Execution             Reject Repeated Bar Execution     Requirement 2          PASSED
-Execution             Broker Active Position Duplicate  Requirement 2          PASSED
-Execution             Broker Deal History Duplicate     Requirement 2          PASSED
-Persistence           Binary State Serialization Round  Rule 15                PASSED
-Persistence           Executed Hash Disk Persistence    Requirement 2 & 15     PASSED
-========================================================================================
-```
-Execution             Reject Duplicate Hash in Memory   Requirement 2          PASSED
-Execution             Reject Repeated Bar Execution     Requirement 2          PASSED
-Execution             Broker Active Position Duplicate  Requirement 2          PASSED
-Execution             Broker Deal History Duplicate     Requirement 2          PASSED
-Persistence           Binary State Serialization Round  Rule 15                PASSED
-Persistence           Executed Hash Disk Persistence    Requirement 2 & 15     PASSED
-========================================================================================
-```
+It is not statistically calibrated and must not be interpreted as a win probability until separately validated. The user-configurable minimum score defaults to 65. Stop distance uses the selected zone boundary plus 0.10 M5 ATR (at least one tick); target is the nearest opposing zone or a valid H4 range extreme. Entries are vetoed when RR is below `InpMinimumRR` (default 1.50).
 
----
+Every veto populates `QMEAnalysis.reason`, including unavailable quote/data, no qualifying zones (with OB/FVG/sweep counts), unaligned bias, no nearby zone, missing M5 confirmation, no structural target, invalid stop, low RR, and low score. The dashboard includes the reason, zone count, score breakdown, RR, and selected target. Zone rectangles and the target line are chart objects; signal buffers are analysis outputs only.
 
-## 5. Verification Status by Independent Stage
+## Tests and verification
 
-In strict adherence to engineering verification policy:
+- `MQL5/Scripts/QME/QME_RunTests.mq5` has native test cases for FVG boundaries/thresholds, order-block displacement, sweeps, zone grade, score, RR, and tick rounding.
+- `Tests/test_qme_features.py` has 18 host tests for synchronization/retry/readiness contracts, no-trade safety, zone features, symbol-agnostic tick quantization, score/RR, and no-entry explanations.
+- `verify_qme.py` checks source inventory, include guards and cycles, indicator safety, data-readiness contracts, zone/scoring requirements, delimiters, and the host test suite.
 
-1. **Static Verification:** **PASSED (100%)**
-   - Verified across 38 MQL5 source files. Zero syntax delimiter errors, zero dependency cycles, all include guards consistent, all architectural invariants verified.
-2. **MetaEditor Compilation Diagnostics & Remediation:** **RESOLVED & ALIGNED WITH MQL5 COMPILER SPECIFICATION**
-   - **MQL5 Syntax Remediation Completed:**
-     - *Issue 1 (Operator syntax):* MQL5 uses dot notation (`.`) rather than C++ arrow (`->`) for member dereference through object pointers (`CObject* ptr; ptr.Method()`). Replaced across all 18 files where `->` was parsed as subtraction/comparison by MetaEditor (`error 223: '>' - operand expected`).
-     - *Issue 2 (Reference semantics):* Fixed `BarHistory.mqh(59)` where local reference initialization (`datetime &cachedTime = ...`) triggered `error 229: reference cannot used`. MQL5 permits references only in function signatures; refactored to explicit conditional branch logic.
-     - *Issue 3 (Pointer-to-reference binding):* Eliminated invalid unary `*` dereference operators (`*m_risk.GetExposureGuard()`) in `EngineRuntime.mqh` by adding pointer method signatures and overloads in `CRiskEngine` and `CRecoveryEngine`.
-     - *Issue 4 (Trade transaction struct members):* In `QME_Main.mq5(124)`, replaced non-existent `trans.profit` with valid `trans.position` on `MqlTradeTransaction` (`error 256: undeclared identifier 'profit'`).
-     - *Issue 5 (CTrade filling mode encapsulation):* In `OrderManager.mqh(114)`, MetaEditor reported `error 256: undeclared identifier 'TypeFilling'` because MQL5's `CTrade` standard library defines `SetTypeFilling()` without a getter. Resolved by encapsulating `ENUM_ORDER_TYPE_FILLING m_fillingMode` directly within `COrderManager` and assigning `request.type_filling = m_fillingMode`.
-     - *Issue 6 (Binary struct serialization constraint):* In `Types.mqh`, replaced `string lockdownReason` in `EnginePersistedState` with fixed-size `char lockdownReason[64]`. Under MQL5 compiler rules, `FileWriteStruct` and `FileReadStruct` strictly forbid structures containing dynamic string or object instances (`error 368: structures or classes containing objects are not allowed`). Converted struct to pure Plain Old Data (POD).
-   - Verified 0 remaining compiler errors, 0 warnings.
-3. **Strategy Tester Verification:** **NOT EXECUTED (Awaiting Desktop Terminal Deployment)**
-   - Requires live MetaTrader 5 desktop client with broker history feed.
-4. **MT5 Demo Runtime Verification:** **NOT EXECUTED (Awaiting Desktop Terminal Deployment)**
-   - Requires active demo broker account connection. Default `TRADING_MODE_ANALYSIS_ONLY` ensures safe attachment.
+**Run in this environment:** `python3 -m unittest discover -s Tests -p 'test_*.py' -v` passed 14 tests. `python3 verify_qme.py` passed all host checks. These are host/static checks, not MQL compilation or MT5 runtime verification.
+
+**Not run:** MetaEditor compile, MT5 Strategy Tester, live/demo terminal. The current environment does not provide MetaEditor/Windows MT5. No claim of compiled or runtime-tested behavior is made.
+
+## Current public inputs and outputs
+
+New inputs: `InpRequiredHistoryBars`, `InpTimerSeconds`, `InpMinimumScore`, `InpMinimumRR`, and `InpDrawZones`. The indicator exposes two arrow buffers for accepted buy/sell analysis signals, dashboard text via `Comment`, zone rectangles, and a structural target line. Because the original source/interfaces were absent, these are newly established—not verified-compatible—interfaces.
+
+## Terminal verification steps
+
+1. Open `MQL5/Indicators/QME/QME_Indicator.mq5` in MetaEditor and compile with F7. Resolve any terminal/compiler-specific diagnostics before runtime use.
+2. Compile `MQL5/Scripts/QME/QME_RunTests.mq5`; run it from MT5 and verify all native assertions pass.
+3. Attach the indicator to BTCUSD H1 after the terminal has loaded H4/H1/M5 history. Inspect the dashboard and Experts/Journal logs while data synchronizes; confirm retries, timer readiness, no pre-readiness calculations, and a specific no-entry reason when gated.
+4. Check zone boundaries against symbol tick size, grades, score components, target, and RR. Repeat on XAUUSD, a forex pair, and an index.
+5. Verify the indicator is analysis-only: it must not issue, modify, or close trades. Test the history-not-ready case by attaching before the required timeframe history has finished loading, then confirm the timer recovers once data is available.
+6. Record actual compiler and terminal output before changing status to compiled or runtime-tested.
