@@ -1,0 +1,25 @@
+# QME Review Findings
+
+**Review date:** 2026-11-17
+**Reviewed revision:** `7e0b7a4ce51757f09355560e612bc2405aa8e24f`
+**Review status:** blocked for MQL5 implementation review because the source tree is absent. Findings below distinguish verified repository facts from unverified behavior.
+
+## Findings
+
+| ID | Severity | Finding | File / line evidence | Fix status |
+|---|---|---|---|---|
+| F-01 | **Critical** | The checked-out repository has no `.mq5` or `.mqh` implementation, indicator entry point, or native tests. Therefore the requested loader, bias/zone/target, FSM/MTF, and no-trading properties cannot be inspected or changed. | `MQL5/Include/QME/**` and indicator/test entry points: **absent**. The verifier expects 14 module directories and EA/test entry points at `verify_qme.py:47–50, 67–95`. | **Blocked — source required.** No MQL5 behavior was changed. |
+| F-02 | **Critical** | The historical design evidence conflicts with the requested product boundary. The compile script targets an Expert Advisor; the historical EA log includes `RiskEngine` → `OrderManager` → `Trade.mqh`. This is not evidence that the current missing source trades, but it is incompatible with accepting the described architecture for an analysis-only indicator. | `compile_metaeditor.bat:26–30`; `MQL5/build_ea.log:3, 24–33`; prior report content is replaced by the evidence-based report. | **Blocked — implementation absent.** Confirm the restored entry point is an indicator and audit for all trade APIs before accepting it. |
+| F-03 | **High** | Multi-timeframe data readiness and the reported unknown bias / missing zones and targets have no source-level root cause or fix established. The repository lacks the implementation and the verifier has no checks for `BarsCalculated`, error 4806, `SERIES_SYNCHRONIZED`, `CopyRates`/`CopyBuffer` retries, or timer-based retries. | MQL5 implementation files: **absent**. `verify_qme.py:1–13, 398–458` describes static checks and toy math/SMC simulations, not runtime MTF readiness. | **Blocked — source and MT5 runtime required.** No fix claimed. |
+| F-04 | **High** | No defensible single-source-of-truth decision or FSM/MTF migration can be made from the checked-in logs. Choosing one path or deleting the other without source would be speculative and could change visible indicator behavior. | FSM/MTF source and call sites: **absent**. The old build log only lists includes; it does not contain implementation logic. | **Blocked — source required.** Decision explicitly deferred in `QME_Architecture_and_Engineering_Report.md`. |
+| F-05 | **High** | Before this review, the verifier continued into file-level checks after an inventory failure; in this checkout it raised an uncaught `FileNotFoundError` for `StructureAnalysis.mqh`. An empty include tree could also be reported as zero-cycle/zero-header success. | Previous run failed opening `MQL5/Include/QME/Analysis/StructureAnalysis.mqh`; fail-fast gate is now at `verify_qme.py:517–524`. | **Fixed for missing/incomplete source trees.** Verified after change by running the harness; it now exits nonzero with an explicit blocked result rather than a traceback. This does not validate MQL5 code. |
+| F-06 | **High** | The previously checked-in architecture report claimed 38-source static verification, resolved compilation diagnostics, and extensive trading/risk architecture without current source evidence and with a product-scope mismatch. | The replaced report was the only architecture document in the checkout; historical build evidence is limited to `MQL5/build_ea.log` and `MQL5/build_tests.log`. | **Fixed as a documentation accuracy issue.** The report now records only repository evidence and changes actually made; it does not claim MQL5 fixes. |
+| F-07 | **Medium** | The MetaEditor batch build is Windows-specific and targets `Experts/QME/QME_Main.mq5` plus `Scripts/QME/QME_RunTests.mq5`, neither of which is present. It cannot compile the requested indicator in this environment. | `compile_metaeditor.bat:7–20, 24–34`; absent target paths. | **Blocked.** No MetaEditor, Windows `cmd.exe`, or Wine is available here. The script itself was not run. |
+| F-08 | **Low** | A stray `.sudo_as_admin_successful` file was tracked, and no `.gitignore` existed. | Root `.sudo_as_admin_successful`; `.gitignore` previously absent. | **Fixed.** Removed the stray file and added `.gitignore` for generated MT5 artifacts and local noise. |
+
+## Verification record
+
+- `python3 verify_qme.py` before the fail-fast change: **failed** after reporting all expected module directories missing, then raised `FileNotFoundError` for `MQL5/Include/QME/Analysis/StructureAnalysis.mqh`.
+- `python3 verify_qme.py` after the change: **statically checked only for the missing-source preflight**; expected nonzero exit and explicit blocked message. No MQL5 source checks ran.
+- MetaEditor: **not compiled** in this environment. Historical checked-in logs report zero errors and zero warnings from a different Windows workspace; they do not verify this revision.
+- MT5 Strategy Tester / terminal: **not runtime-tested**.

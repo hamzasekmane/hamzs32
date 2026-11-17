@@ -514,8 +514,16 @@ def main():
     print("# QUANTUMMARKETENGINE (QME) - VERIFICATION HARNESS")
     print("#" * 70)
 
+    # Do not report empty include trees as successful checks or continue into
+    # file-level assertions when the required source tree is absent.
+    if not test_inventory():
+        print_header("VERIFICATION BLOCKED")
+        print("  [BLOCKED] Required MQL5 source files are missing or incomplete.")
+        print("  Restore MQL5/Include/QME, the indicator entry point, and native tests;")
+        print("  then rerun this harness. No source-level checks were performed.")
+        return 1
+
     results = [
-        test_inventory(),
         test_include_guards(),
         test_dependency_graph(),
         test_architectural_rules(),
