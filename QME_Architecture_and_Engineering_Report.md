@@ -38,7 +38,7 @@ There is no legacy M15 FSM implementation in the restored/current source tree, s
 4. Retries each `CopyBuffer` read and reports which timeframe/buffer failed.
 5. Reports readiness only after all three timeframes, their rates, ATR, and EMA buffers are valid.
 
-The indicator starts a timer (`InpTimerSeconds`, default two seconds). Each `OnTimer` calls `Refresh` again, allowing history synchronization to progress without a busy wait. `OnCalculate` and the analysis routine gate all signal/zone calculation on `Ready()`. Before readiness, the dashboard says calculation is deferred and the signal buffers are empty.
+The indicator starts a timer (`InpTimerSeconds`, default two seconds). Each `OnTimer` calls `Refresh` again, allowing history synchronization to progress without a busy wait. `OnCalculate` and the analysis routine gate all signal/zone calculation on `ReadyNow()`, which rechecks H4/H1/M5 synchronization against the cached loaded data. Before readiness, the dashboard says calculation is deferred and the signal buffers are empty.
 
 Retries are bounded within each event and recur on subsequent timer events. No `Sleep` is used from indicator code.
 
@@ -76,7 +76,7 @@ Every veto populates `QMEAnalysis.reason`, including unavailable quote/data, no 
 - `Tests/test_qme_features.py` has 18 host tests for synchronization/retry/readiness contracts, no-trade safety, zone features, symbol-agnostic tick quantization, score/RR, and no-entry explanations.
 - `verify_qme.py` checks source inventory, include guards and cycles, indicator safety, data-readiness contracts, zone/scoring requirements, delimiters, and the host test suite.
 
-**Run in this environment:** `python3 -m unittest discover -s Tests -p 'test_*.py' -v` passed 14 tests. `python3 verify_qme.py` passed all host checks. These are host/static checks, not MQL compilation or MT5 runtime verification.
+**Run in this environment:** `python3 -m unittest discover -s Tests -p 'test_*.py' -v` passed 18 tests. `python3 verify_qme.py` passed all host checks. These are host/static checks, not MQL compilation or MT5 runtime verification.
 
 **Not run:** MetaEditor compile, MT5 Strategy Tester, live/demo terminal. The current environment does not provide MetaEditor/Windows MT5. No claim of compiled or runtime-tested behavior is made.
 

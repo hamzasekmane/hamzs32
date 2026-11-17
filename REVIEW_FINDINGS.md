@@ -1,7 +1,7 @@
 # QME Review Findings
 
 **Review date:** 2026-11-17
-**Branch:** `arena/456a48f0-hamzs32`
+**Branch:** `arena/4f849e91-hamzs32`
 **Status:** new indicator implementation and host tests added; MetaEditor/MT5 verification remains outstanding. The original checkout contained no MQL5 source, so this review distinguishes reconstruction from migration of missing code.
 
 | ID | Severity | Finding | File / line evidence | Fix status |
