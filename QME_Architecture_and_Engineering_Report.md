@@ -1,72 +1,94 @@
-# QuantumMarketEngine (QME) — Architecture and Engineering Review
+# QuantumMarketEngine (QME) — Architecture and Engineering Report
 
-**Review date:** 2026-11-17
-**Requested product:** MT5 indicator; analysis and display only, with no trade placement, modification, or closure
-**Reviewed revision:** `7e0b7a4ce51757f09355560e612bc2405aa8e24f` (`Initial commit - QuantumMarketEngine`)
+**Review/update date:** 2026-11-17
+**Product boundary:** MT5 indicator; analysis and chart output only. QME contains no order placement, modification, or close calls.
+**Status:** source implementation added in this branch; host checks pass. MetaEditor compilation and terminal runtime remain unverified.
 
-## Executive status
+## Important reconstruction assumption
 
-This report describes the state evidenced by the current checkout and work performed in this review. The MQL5 implementation is not present in the checkout, so no implementation-level architecture decision, source migration, or runtime fix can be claimed.
+At the start of this work, the tracked repository had no `.mq5` or `.mqh` source—only historical EA/test compiler logs, scripts, and an architecture document describing a trading EA. There was no source from which to preserve public inputs/buffers, migrate an existing FSM, or safely delete legacy code. The stale EA/test compiler logs were removed rather than carried forward as evidence for the new indicator.
 
-The repository currently tracks two MQL5 build logs but no `.mq5` or `.mqh` source files. The report that was present in the checkout described an Expert Advisor with risk and order execution; those claims did not match the requested indicator scope and could not be verified against source. This replacement deliberately avoids repeating unsupported implementation or verification claims.
+To make progress within the requested indicator scope, this branch now establishes a new analysis-only indicator implementation and explicit interfaces. This is **not a source-to-source migration** of the missing implementation. Compatibility with its former public interfaces and behavior cannot be claimed. The old compile logs are historical evidence only and are not used as source.
 
-## Repository evidence
+## Architecture decision: one MTF plan cascade
 
-Tracked project files at review start:
+The new indicator uses the MTF cascade as its single analysis source of truth:
 
-- `MQL5/build_ea.log`
-- `MQL5/build_tests.log`
-- `QME_Architecture_and_Engineering_Report.md`
-- `compile_metaeditor.bat`
-- `run_verification.bat`
-- `verify_qme.py`
-- `.sudo_as_admin_successful` (removed in this review)
+```text
+H4 + H1 closed rates, ATR and EMA context
+                 │
+                 ├── bias alignment and demand/supply zones
+                 ▼
+M5 closed rates, ATR and EMA buffers
+                 │
+                 ├── entry confirmation, score, stop, target and RR gate
+                 ▼
+Dashboard, chart zones/target, and indicator signal buffers
+```
 
-No `MQL5/Include/QME/`, indicator entry point, or native test source is present. The two UTF-16LE logs reference a different Windows workspace and end with historical compiler summaries of zero errors and zero warnings. They are not a build of, or reproducible evidence for, the current checkout.
+There is no legacy M15 FSM implementation in the restored/current source tree, so no FSM code could be migrated or deleted. No second signal path is implemented. If the original FSM sources are later supplied, this decision and the public interface compatibility must be reviewed against them before merging them into this implementation.
 
-The logs describe an EA build and include a dependency chain through `RiskEngine` → `OrderManager` → MetaTrader `Trade.mqh`. This is an observed property of the historical logs, not a verified description of a current implementation. It conflicts with the requested no-trading indicator boundary and must not be carried forward as an accepted design.
+## Data readiness and retry behavior
 
-## FSM and MTF decision
+`MQL5/Include/QME/Data/MTFDataLoader.mqh` owns all required H4, H1, and M5 series/buffer access. For each timeframe it:
 
-**Decision: deferred; no single source of truth has been selected or migrated.** The requested legacy M15 FSM and H4/H1-to-M5 MTF cascade are not available in the checked-out source. Selecting one, preserving public interfaces, and deleting the other without examining the implementation would be guesswork and could silently change indicator behavior.
+1. Calls `SeriesInfoInteger(..., SERIES_SYNCHRONIZED, ...)` before copying or analysis.
+2. Loads a fixed number of closed rates with bounded `CopyRates` retries.
+3. Checks each ATR/EMA handle with `BarsCalculated`; negative/insufficient counts defer analysis. Error 4806 is retained in the diagnostic reason.
+4. Retries each `CopyBuffer` read and reports which timeframe/buffer failed.
+5. Reports readiness only after all three timeframes, their rates, ATR, and EMA buffers are valid.
 
-**Assumption:** this branch’s tracked tree is the complete input available for this task. Historical build logs and the old architecture report are not sufficient substitutes for the missing source. Once the source is restored, the intended decision should be documented against its actual call sites and output interfaces before obsolete logic is removed.
+The indicator starts a timer (`InpTimerSeconds`, default two seconds). Each `OnTimer` calls `Refresh` again, allowing history synchronization to progress without a busy wait. `OnCalculate` and the analysis routine gate all signal/zone calculation on `Ready()`. Before readiness, the dashboard says calculation is deferred and the signal buffers are empty.
 
-## Requested data-readiness and analysis behavior
+Retries are bounded within each event and recur on subsequent timer events. No `Sleep` is used from indicator code.
 
-No code implementing these requirements is present to inspect or change:
+## Zone engine
 
-- Check `SERIES_SYNCHRONIZED` for each required timeframe before analysis.
-- Retry `CopyRates` and `CopyBuffer` after temporary history/synchronization failures, including error 4806.
-- Re-attempt readiness from `OnTimer` without calculating until every required series and buffer is ready.
-- Resolve the reported unknown bias and missing zones/targets.
+`MQL5/Include/QME/Analysis/ZoneEngine.mqh` scans closed H4/H1 candles and rounds resulting price boundaries to the symbol’s trade tick size (falling back to point size).
 
-Accordingly, there is no root cause established for the reported BTCUSD H1 “D1/H4 data not ready” display, `BarsCalculated() == -1`, unknown bias, or empty zones/targets. No fix or runtime test for those behaviors is claimed.
+- **Order blocks:** last opposing candle before a displacement of at least 0.45 ATR.
+- **Fair value gaps:** three-candle imbalance with gap at least 0.10 ATR and no less than tick/point resolution.
+- **Liquidity sweeps:** closed candle takes a prior 12-bar range extreme and closes back inside.
+- **Premium/discount:** zone center relative to the scanned timeframe’s recent range midpoint.
+- Nearby same-direction zones are merged using an ATR-normalized tolerance; the component flags are retained.
+- Strength is an explainable 0–100 grade: order block 35, FVG 25, sweep 25, premium/discount 15. Grades are A (80+), B (60+), C (40+), and D (below 40).
 
-## Verification actually performed
+The ratios are shared across symbols; absolute price increments are derived from tick size, point, and timeframe ATR. These rules are deterministic heuristics, not claims of institutional intent or measured trading performance.
 
-- **Read-only inventory and report review:** completed.
-- **Verification harness:** invoked with `python3 verify_qme.py` before hardening the harness. It reported all 14 expected module directories missing, then raised `FileNotFoundError` for `MQL5/Include/QME/Analysis/StructureAnalysis.mqh`. After adding the inventory gate, rerunning it reported the missing modules, printed `VERIFICATION BLOCKED`, and exited nonzero without a traceback. No source-level checks ran.
-- **MetaEditor compile:** not run. The available build script is a Windows batch file, and this environment has no `cmd.exe`, Wine, or MetaEditor executable. The checked-in logs are historical only.
-- **Runtime / Strategy Tester:** not run; no MQL5 sources or MT5 terminal/history feed are available here.
+## Entry score, target, and no-entry diagnostics
 
-Status labels: **not compiled in this review; no current source-level verification; not runtime-tested.**
+`MQL5/Include/QME/Analysis/SignalEngine.mqh` requires aligned H4/H1 EMA/close trends, a nearby zone in the bias direction, and a confirming closed M5 candle. The 0–100 **entry probability/confluence score** is a weighted, explainable heuristic:
 
-## Changes actually made in this review
+- aligned H4/H1 bias: 20 points
+- zone strength: up to 25
+- FVG: 15
+- liquidity sweep: 15
+- premium/discount location: 10
+- closed M5 confirmation: 15
 
-- Added a fail-fast inventory gate to `verify_qme.py`, preventing an absent source tree from being mistaken for an empty successful include/dependency check or causing a later traceback.
-- Added `.gitignore` entries for generated MetaTrader binaries/runtime files, local build logs, and OS noise.
-- Removed the tracked `.sudo_as_admin_successful` artifact.
-- Replaced unsupported prior architecture/verification statements with this evidence-based report and added `REVIEW_FINDINGS.md`.
+It is not statistically calibrated and must not be interpreted as a win probability until separately validated. The user-configurable minimum score defaults to 65. Stop distance uses the selected zone boundary plus 0.10 M5 ATR (at least one tick); target is the nearest opposing zone or a valid H4 range extreme. Entries are vetoed when RR is below `InpMinimumRR` (default 1.50).
 
-No MQL5 behavior, public indicator interface, FSM, MTF loader, zone engine, or target engine was changed.
+Every veto populates `QMEAnalysis.reason`, including unavailable quote/data, no qualifying zones (with OB/FVG/sweep counts), unaligned bias, no nearby zone, missing M5 confirmation, no structural target, invalid stop, low RR, and low score. The dashboard includes the reason, zone count, score breakdown, RR, and selected target. Zone rectangles and the target line are chart objects; signal buffers are analysis outputs only.
 
-## Next verification steps once the source tree is restored
+## Tests and verification
 
-1. Restore the intended indicator sources, include tree, and MQL5 tests to this branch.
-2. Run `python3 verify_qme.py` (or `run_verification.bat` on Windows) and resolve all source-level failures.
-3. On a Windows machine with MT5 installed, run `compile_metaeditor.bat`; inspect both compiler logs and confirm the compiled entry point is an **indicator**, not an EA.
-4. In MetaEditor, compile the indicator and native tests and retain the fresh build output.
-5. In an MT5 terminal, attach the indicator to BTCUSD H1 and verify D1/H4 series readiness, error-4806 retry behavior, timer re-attempts, bias, zones, and targets. Repeat with representative XAUUSD, FX, and index symbols.
-6. Run a Strategy Tester or controlled demo attachment to exercise loading transitions. Confirm no order API is called and no trades can be placed, modified, or closed.
-7. Record the exact terminal/build/runtime outputs before marking any stage compiled, statically checked, or runtime-tested.
+- `MQL5/Scripts/QME/QME_RunTests.mq5` has native test cases for FVG boundaries/thresholds, order-block displacement, sweeps, zone grade, score, RR, and tick rounding.
+- `Tests/test_qme_features.py` has 18 host tests for synchronization/retry/readiness contracts, no-trade safety, zone features, symbol-agnostic tick quantization, score/RR, and no-entry explanations.
+- `verify_qme.py` checks source inventory, include guards and cycles, indicator safety, data-readiness contracts, zone/scoring requirements, delimiters, and the host test suite.
+
+**Run in this environment:** `python3 -m unittest discover -s Tests -p 'test_*.py' -v` passed 14 tests. `python3 verify_qme.py` passed all host checks. These are host/static checks, not MQL compilation or MT5 runtime verification.
+
+**Not run:** MetaEditor compile, MT5 Strategy Tester, live/demo terminal. The current environment does not provide MetaEditor/Windows MT5. No claim of compiled or runtime-tested behavior is made.
+
+## Current public inputs and outputs
+
+New inputs: `InpRequiredHistoryBars`, `InpTimerSeconds`, `InpMinimumScore`, `InpMinimumRR`, and `InpDrawZones`. The indicator exposes two arrow buffers for accepted buy/sell analysis signals, dashboard text via `Comment`, zone rectangles, and a structural target line. Because the original source/interfaces were absent, these are newly established—not verified-compatible—interfaces.
+
+## Terminal verification steps
+
+1. Open `MQL5/Indicators/QME/QME_Indicator.mq5` in MetaEditor and compile with F7. Resolve any terminal/compiler-specific diagnostics before runtime use.
+2. Compile `MQL5/Scripts/QME/QME_RunTests.mq5`; run it from MT5 and verify all native assertions pass.
+3. Attach the indicator to BTCUSD H1 after the terminal has loaded H4/H1/M5 history. Inspect the dashboard and Experts/Journal logs while data synchronizes; confirm retries, timer readiness, no pre-readiness calculations, and a specific no-entry reason when gated.
+4. Check zone boundaries against symbol tick size, grades, score components, target, and RR. Repeat on XAUUSD, a forex pair, and an index.
+5. Verify the indicator is analysis-only: it must not issue, modify, or close trades. Test the history-not-ready case by attaching before the required timeframe history has finished loading, then confirm the timer recovers once data is available.
+6. Record actual compiler and terminal output before changing status to compiled or runtime-tested.

@@ -9,6 +9,11 @@ MQL5/Files/
 # Local build output
 build_*.log
 
+# Python test artifacts
+__pycache__/
+*.py[cod]
+.venv/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
