@@ -51,12 +51,12 @@ void SetSignalBuffers(void)
       SellSignalBuffer[0]=g_analysis.entry;
   }
 
-void DrawAnalysis(void)
+void DrawAnalysis(const bool data_ready)
   {
    for(int i=0;i<g_drawn_zones;i++)
       ObjectDelete(0,QME_OBJECT_PREFIX+"zone_"+IntegerToString(i));
    g_drawn_zones=0;
-   if(InpDrawZones && g_data.ReadyNow())
+   if(InpDrawZones && data_ready)
      {
       int seconds=PeriodSeconds((ENUM_TIMEFRAMES)_Period);
       if(seconds<=0) seconds=60;
@@ -112,7 +112,7 @@ void UpdateAnalysis(void)
       Comment("QuantumMarketEngine | Analysis only (no trading)\n",
               "Data: WAITING | ",g_data.Reason(),"\n",
               "No calculation performed until required data is ready.");
-      DrawAnalysis();
+      DrawAnalysis(false);
       return;
      }
 
@@ -129,7 +129,7 @@ void UpdateAnalysis(void)
            g_analysis.explanation,"\n",
            g_analysis.reason,"\n",
            "Zone scan: ",g_zones.Reason());
-   DrawAnalysis();
+   DrawAnalysis(true);
   }
 
 int OnInit(void)
@@ -191,9 +191,6 @@ int OnCalculate(const int rates_total,const int prev_calculated,
                 const long &volume[],const int &spread[])
   {
    if(rates_total<=0) return(0);
-   ArraySetAsSeries(time,true);
-   ArraySetAsSeries(high,true);
-   ArraySetAsSeries(low,true);
    if(prev_calculated==0)
      {
       for(int i=0;i<rates_total;i++)
@@ -208,14 +205,7 @@ int OnCalculate(const int rates_total,const int prev_calculated,
       SellSignalBuffer[0]=EMPTY_VALUE;
      }
 
-   // No analysis is performed here until the timer has made every required series ready.
-   if(!g_data.ReadyNow())
-     {
-      Comment("QuantumMarketEngine | Analysis only (no trading)\n",
-              "Data: WAITING | ",g_data.Reason(),"\n",
-              "No calculation performed until required data is ready.");
-      return(rates_total);
-     }
+   // UpdateAnalysis owns the single readiness gate for every event path.
    UpdateAnalysis();
    return(rates_total);
   }
