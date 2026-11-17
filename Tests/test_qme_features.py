@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -15,7 +16,7 @@ class DataReadinessContractTests(unittest.TestCase):
     def test_mtf_loader_checks_sync_calculated_bars_and_4806(self):
         source = (ROOT / "MQL5/Include/QME/Data/MTFDataLoader.mqh").read_text()
         for token in ("SERIES_SYNCHRONIZED", "SeriesInfoInteger", "BarsCalculated",
-                      "QME_HISTORY_NOT_FOUND 4806", "m_error_4806"):
+                      "QME_HISTORY_NOT_FOUND 4806", "bars_error==QME_HISTORY_NOT_FOUND"):
             with self.subTest(token=token):
                 self.assertIn(token, source)
 
@@ -38,13 +39,83 @@ class DataReadinessContractTests(unittest.TestCase):
         self.assertLess(load_frame.index("IsSynchronized(tf)"), load_frame.index("CopyRatesRetry(tf"))
         self.assertLess(load_frame.index("CopyRatesRetry(tf"), load_frame.index("CopyOneBufferRetry(atr_handle"))
 
+    def test_unused_accessors_and_wrappers_are_removed(self):
+        loader = (ROOT / "MQL5/Include/QME/Data/MTFDataLoader.mqh").read_text()
+        zones = (ROOT / "MQL5/Include/QME/Analysis/ZoneEngine.mqh").read_text()
+        for source, obsolete in ((loader, ("bool Ready(void)", "HadHistory4806")),
+                                 (zones, ("OrderBlockCount", "FVGCount", "SweepCount", "StrengthFor", "double RoundToTick("))):
+            for token in obsolete:
+                with self.subTest(token=token):
+                    self.assertNotIn(token, source)
+
+    def test_architecture_decision_and_migration_limit_are_documented(self):
+        report = (ROOT / "QME_Architecture_and_Engineering_Report.md").read_text()
+        for decision in (
+            "Architecture decision: MTF is the sole analysis path",
+            "Use one H4/H1-to-M5 multi-timeframe analysis cascade, with no persisted FSM decision state or parallel signal path.",
+            "no legacy FSM source files or FSM transitions in the available tree",
+            "The archived EA architecture document is a design narrative, not source",
+            "Deliberately excluded: they are outside the indicator’s analysis-only boundary.",
+            "remain blocked—not silently treated as complete",
+        ):
+            with self.subTest(decision=decision):
+                self.assertIn(decision, report)
+
+    def test_current_public_inputs_buffers_and_dashboard_contract(self):
+        source = (ROOT / "MQL5/Indicators/QME/QME_Indicator.mq5").read_text()
+        report = (ROOT / "QME_Architecture_and_Engineering_Report.md").read_text()
+        inputs = re.findall(r"^input\s+(\w+)\s+(Inp\w+)\s*=\s*([^;]+);", source, re.MULTILINE)
+        self.assertEqual(inputs, [
+            ("int", "InpRequiredHistoryBars", "100"),
+            ("int", "InpTimerSeconds", "2"),
+            ("double", "InpMinimumScore", "65.0"),
+            ("double", "InpMinimumRR", "1.50"),
+            ("bool", "InpDrawZones", "true"),
+        ])
+        source_contract = (
+            "#property indicator_buffers 2",
+            '"QME demand signal"',
+            '"QME supply signal"',
+            "SetIndexBuffer(0,BuySignalBuffer,INDICATOR_DATA)",
+            "SetIndexBuffer(1,SellSignalBuffer,INDICATOR_DATA)",
+            'QuantumMarketEngine | Analysis only (no trading)',
+            'Data: WAITING | ',
+            'No calculation performed until required data is ready.',
+            'Data: READY | Bias: ',
+            'Entry probability score: ',
+            ' | Entry gate: ',
+            'Zone scan: ',
+            'g_analysis.explanation',
+            'g_analysis.reason',
+        )
+        for contract in source_contract:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, source)
+        documented_contract = (
+            "InpRequiredHistoryBars = 100", "InpTimerSeconds = 2",
+            "InpMinimumScore = 65.0", "InpMinimumRR = 1.50", "InpDrawZones = true",
+            "BuySignalBuffer[]", "QME demand signal", "SellSignalBuffer[]", "QME supply signal",
+            "Data: WAITING | <reason>", "No calculation performed until required data is ready.",
+            "Data: READY | Bias: <bias> | Zones: <count>",
+            "Entry probability score: <score>/100 | RR: <ratio> | Entry gate: <status>",
+            "explanation, veto reason, and `Zone scan: <reason>`",
+        )
+        for contract in documented_contract:
+            with self.subTest(documented_contract=contract):
+                self.assertIn(contract, report)
+        self.assertIn("Historical interface preservation remains unverified", report)
+
     def test_timer_retries_and_calculation_is_gated(self):
         source = (ROOT / "MQL5/Indicators/QME/QME_Indicator.mq5").read_text()
         self.assertIn("EventSetTimer", source)
         self.assertIn("void OnTimer(void)", source)
         self.assertIn("g_data.Refresh()", source)
+        orchestrator = source[source.index("void UpdateAnalysis(void)"):source.index("int OnInit(void)")]
+        self.assertLess(orchestrator.index("if(!g_data.ReadyNow())"), orchestrator.index("g_zones.Build(g_data)"))
+        self.assertLess(orchestrator.index("if(!g_data.ReadyNow())"), orchestrator.index("g_signals.Evaluate("))
         calculate = source[source.index("int OnCalculate("):]
-        self.assertLess(calculate.index("if(!g_data.ReadyNow())"), calculate.index("UpdateAnalysis();"))
+        self.assertIn("UpdateAnalysis();", calculate)
+        self.assertEqual(source.count("g_data.ReadyNow()"), 1)
         self.assertIn("No calculation performed until required data is ready", source)
 
     def test_every_no_entry_path_has_a_specific_reason(self):

@@ -20,7 +20,6 @@ private:
    double       m_m5_atr_value, m_m5_fast_value, m_m5_slow_value;
    int          m_required_rates;
    bool         m_ready;
-   bool         m_error_4806;
    string       m_reason;
 
    bool CreateFrameHandles(const ENUM_TIMEFRAMES tf,
@@ -48,9 +47,8 @@ private:
       if(!SeriesInfoInteger(m_symbol,tf,SERIES_SYNCHRONIZED,synchronized) || synchronized==0)
         {
          int error=GetLastError();
-         m_error_4806=(error==QME_HISTORY_NOT_FOUND);
          m_reason=StringFormat("Waiting for %s series synchronization%s",
-                               EnumToString(tf),m_error_4806?" (history error 4806)":"");
+                               EnumToString(tf),error==QME_HISTORY_NOT_FOUND?" (history error 4806)":"");
          return(false);
         }
       return(true);
@@ -90,10 +88,9 @@ private:
            }
          else
            {
-            m_error_4806=(error==QME_HISTORY_NOT_FOUND);
             m_reason=StringFormat("CopyRates(%s) attempt %d/%d copied %d/%d%s",
                                   EnumToString(tf),attempt,QME_LOAD_ATTEMPTS,copied,m_required_rates,
-                                  m_error_4806?"; history error 4806":"");
+                                  error==QME_HISTORY_NOT_FOUND?"; history error 4806":"");
            }
         }
       return(false);
@@ -111,10 +108,9 @@ private:
          int bars_error=GetLastError();
          if(calculated<0 || calculated<QME_MIN_CALCULATED_BARS)
            {
-            m_error_4806=(bars_error==QME_HISTORY_NOT_FOUND);
             m_reason=StringFormat("BarsCalculated(%s %s)=%d%s; awaiting indicator history",
                                   EnumToString(tf),label,calculated,
-                                  m_error_4806?" (error 4806)":"");
+                                  bars_error==QME_HISTORY_NOT_FOUND?" (error 4806)":"");
             continue;
            }
          ResetLastError();
@@ -125,10 +121,9 @@ private:
             destination=values[0];
             return(true);
            }
-         m_error_4806=(error==QME_HISTORY_NOT_FOUND);
          m_reason=StringFormat("CopyBuffer(%s %s) attempt %d/%d copied %d%s",
                                EnumToString(tf),label,attempt,QME_LOAD_ATTEMPTS,copied,
-                               m_error_4806?"; history error 4806":"");
+                               error==QME_HISTORY_NOT_FOUND?"; history error 4806":"");
         }
       return(false);
      }
@@ -162,7 +157,6 @@ public:
       m_h1_atr=m_h1_fast=m_h1_slow=INVALID_HANDLE;
       m_m5_atr=m_m5_fast=m_m5_slow=INVALID_HANDLE;
       m_ready=false;
-      m_error_4806=false;
       m_required_rates=100;
       m_reason="Not initialized";
      }
@@ -194,7 +188,6 @@ public:
    bool Refresh(void)
      {
       m_ready=false;
-      m_error_4806=false;
       if(!LoadFrame(PERIOD_H4,m_h4_atr,m_h4_fast,m_h4_slow,m_h4_rates,
                     m_h4_atr_value,m_h4_fast_value,m_h4_slow_value)) return(false);
       if(!LoadFrame(PERIOD_H1,m_h1_atr,m_h1_fast,m_h1_slow,m_h1_rates,
@@ -206,7 +199,6 @@ public:
       return(true);
      }
 
-   bool Ready(void) const { return(m_ready); }
    bool ReadyNow(void)
      {
       if(!m_ready) return(false);
@@ -218,7 +210,6 @@ public:
         }
       return(true);
      }
-   bool HadHistory4806(void) const { return(m_error_4806); }
    string Reason(void) const { return(m_reason); }
    double Atr(const ENUM_TIMEFRAMES tf) const
      {

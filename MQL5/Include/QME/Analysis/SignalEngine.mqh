@@ -103,6 +103,7 @@ private:
      }
 
 public:
+   // Caller must pass through the runtime ReadyNow() gate before evaluation.
    void Evaluate(CQMEDataLoader &data,CQMEZoneEngine &zones,const double price,
                  const double minimum_probability,const double minimum_rr,
                  QMEAnalysis &result)
@@ -116,11 +117,6 @@ public:
       result.target=0.0;
       result.rr=0.0;
       result.explanation="No score: data or setup not ready";
-      if(!data.ReadyNow())
-        {
-         result.reason="No entry: "+data.Reason();
-         return;
-        }
       if(price<=0.0 || !MathIsValidNumber(price))
         {
          result.reason="No entry: current symbol quote is unavailable or invalid";

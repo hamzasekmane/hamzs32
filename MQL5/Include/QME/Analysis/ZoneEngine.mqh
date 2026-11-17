@@ -15,22 +15,12 @@ private:
    int     m_ob_count,m_fvg_count,m_sweep_count;
    string  m_reason;
 
-   double RoundToTick(const double price,const double tick)
-     {
-      return(QMERoundToTick(price,tick,tick));
-     }
-
-   double StrengthFor(const int features)
-     {
-      return(QMEZoneStrength(features));
-     }
-
    void AddCandidate(const double raw_low,const double raw_high,const int direction,
                      const int feature,const datetime formed,const double atr,
                      const double range_mid,const double tick)
      {
-      double low=RoundToTick(MathMin(raw_low,raw_high),tick);
-      double high=RoundToTick(MathMax(raw_low,raw_high),tick);
+      double low=QMERoundToTick(MathMin(raw_low,raw_high),tick,tick);
+      double high=QMERoundToTick(MathMax(raw_low,raw_high),tick,tick);
       if(high<=low || atr<=0.0) return;
       int flags=feature;
       double center=(low+high)*0.5;
@@ -43,10 +33,10 @@ private:
         {
          if(m_zones[i].direction!=direction) continue;
          if(low>m_zones[i].high+merge_distance || high<m_zones[i].low-merge_distance) continue;
-         m_zones[i].low=RoundToTick(MathMin(m_zones[i].low,low),tick);
-         m_zones[i].high=RoundToTick(MathMax(m_zones[i].high,high),tick);
+         m_zones[i].low=QMERoundToTick(MathMin(m_zones[i].low,low),tick,tick);
+         m_zones[i].high=QMERoundToTick(MathMax(m_zones[i].high,high),tick,tick);
          m_zones[i].features|=flags;
-         m_zones[i].strength=StrengthFor(m_zones[i].features);
+         m_zones[i].strength=QMEZoneStrength(m_zones[i].features);
          if(formed>m_zones[i].formed) m_zones[i].formed=formed;
          return;
         }
@@ -55,7 +45,7 @@ private:
       m_zones[m_count].high=high;
       m_zones[m_count].direction=direction;
       m_zones[m_count].features=flags;
-      m_zones[m_count].strength=StrengthFor(flags);
+      m_zones[m_count].strength=QMEZoneStrength(flags);
       m_zones[m_count].formed=formed;
       m_count++;
      }
@@ -164,14 +154,10 @@ public:
       m_reason="No zones scanned";
      }
 
+   // Caller must pass through the runtime ReadyNow() gate before scanning.
    void Build(CQMEDataLoader &data)
      {
       Reset();
-      if(!data.ReadyNow())
-        {
-         m_reason="Zone scan deferred: required timeframe data is not ready";
-         return;
-        }
       ScanTimeframe(data,PERIOD_H4);
       ScanTimeframe(data,PERIOD_H1);
       if(m_count==0)
@@ -183,9 +169,6 @@ public:
      }
 
    int Count(void) const { return(m_count); }
-   int OrderBlockCount(void) const { return(m_ob_count); }
-   int FVGCount(void) const { return(m_fvg_count); }
-   int SweepCount(void) const { return(m_sweep_count); }
    string Reason(void) const { return(m_reason); }
    bool Get(const int index,QMEZone &zone) const
      {
