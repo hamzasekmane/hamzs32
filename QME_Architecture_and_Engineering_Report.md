@@ -2,7 +2,7 @@
 
 **Review/update date:** 2026-11-17
 **Product boundary:** MT5 indicator; analysis and chart output only. QME contains no order placement, modification, or close calls.
-**Status:** source implementation added in this branch; host checks pass. MetaEditor compilation and terminal runtime remain unverified.
+**Verification status:** **Compiled: no** (MetaEditor unavailable); **statically checked: yes** (host verifier and 18 Python scenarios passed); **runtime-tested: no** (MT5 cannot be run in this environment).
 
 ## Important reconstruction assumption
 
@@ -76,9 +76,10 @@ Every veto populates `QMEAnalysis.reason`, including unavailable quote/data, no 
 - `Tests/test_qme_features.py` has 18 host tests for synchronization/retry/readiness contracts, no-trade safety, zone features, symbol-agnostic tick quantization, score/RR, and no-entry explanations.
 - `verify_qme.py` checks source inventory, include guards and cycles, indicator safety, data-readiness contracts, zone/scoring requirements, delimiters, and the host test suite.
 
-**Run in this environment:** `python3 -m unittest discover -s Tests -p 'test_*.py' -v` passed 18 tests. `python3 verify_qme.py` passed all host checks. These are host/static checks, not MQL compilation or MT5 runtime verification.
+**Statically checked:** `python3 -m unittest discover -s Tests -p 'test_*.py' -v` passed 18 tests, and `python3 verify_qme.py` passed all host checks. These host checks do not parse or compile MQL5.
 
-**Not run:** MetaEditor compile, MT5 Strategy Tester, live/demo terminal. The current environment does not provide MetaEditor/Windows MT5. No claim of compiled or runtime-tested behavior is made.
+- **Compiled:** No. MetaEditor is unavailable in this Linux environment.
+- **Runtime-tested:** No. MT5 cannot be run in this environment; the Strategy Tester and live/demo terminal were not run.
 
 ## Current public inputs and outputs
 
@@ -86,9 +87,10 @@ New inputs: `InpRequiredHistoryBars`, `InpTimerSeconds`, `InpMinimumScore`, `Inp
 
 ## Terminal verification steps
 
-1. Open `MQL5/Indicators/QME/QME_Indicator.mq5` in MetaEditor and compile with F7. Resolve any terminal/compiler-specific diagnostics before runtime use.
-2. Compile `MQL5/Scripts/QME/QME_RunTests.mq5`; run it from MT5 and verify all native assertions pass.
-3. Attach the indicator to BTCUSD H1 after the terminal has loaded H4/H1/M5 history. Inspect the dashboard and Experts/Journal logs while data synchronizes; confirm retries, timer readiness, no pre-readiness calculations, and a specific no-entry reason when gated.
-4. Check zone boundaries against symbol tick size, grades, score components, target, and RR. Repeat on XAUUSD, a forex pair, and an index.
-5. Verify the indicator is analysis-only: it must not issue, modify, or close trades. Test the history-not-ready case by attaching before the required timeframe history has finished loading, then confirm the timer recovers once data is available.
-6. Record actual compiler and terminal output before changing status to compiled or runtime-tested.
+1. In MT5, choose **File → Open Data Folder**. Copy this repository’s `MQL5/Include/QME` into `<data-folder>/MQL5/Include/QME`, `MQL5/Indicators/QME` into `<data-folder>/MQL5/Indicators/QME`, and `MQL5/Scripts/QME` into `<data-folder>/MQL5/Scripts/QME`.
+2. On Windows, from the repository root run `compile_metaeditor.bat`. It compiles the indicator and native test script and checks that both logs report `0 errors, 0 warnings`. If MetaEditor is installed outside the script’s standard paths, open `QME_Indicator.mq5` and `QME_RunTests.mq5` manually in MetaEditor and press F7 for each; inspect the fresh compile results.
+3. In MT5, refresh Navigator, find `QME_RunTests` under Scripts, run it, and verify the Experts log reports all assertions passed.
+4. Attach `QME_Indicator` to BTCUSD H1. Ensure H4/H1/M5 history is available. Inspect the chart dashboard and Experts/Journal during initial history loading; confirm it waits without calculating, retries on timer, then reports data ready or a specific no-entry reason.
+5. Check tick-aligned zone boundaries, grades, score breakdown, target, and RR. Repeat on XAUUSD, a forex pair, and an index; record the broker symbol names and tick sizes used.
+6. Confirm the indicator is analysis-only and issues no orders. To exercise recovery, attach before required history is fully loaded, observe the waiting/retry state, then confirm readiness after the terminal loads history.
+7. Save the compiler logs, native test output, and chart/Journal observations. Only then update the status to compiled or runtime-tested; do not infer those statuses from the host checks.
